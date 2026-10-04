@@ -1337,5 +1337,72 @@ await check('the card is fixed-positioned, so it is not trapped in a scrolling c
   assert.equal(handle.chip().props.style.pointerEvents, 'auto', 'and still clickable')
 })
 
+// ── the window-drag region ──────────────────────────────────────────────────
+console.log('\nwindow-drag region')
+
+await check('the card opts out of the window-drag region', () => {
+  // DSH's frameless window moves by styling a title-bar strip with
+  // `-webkit-app-region: drag`:
+  //
+  //   [data-windows-titlebar] .BynINW_frame:before {
+  //     height: var(--dsh-windows-titlebar-height);
+  //     -webkit-app-region: drag;
+  //   }
+  //
+  // The overlay spans the frame, so a card that drifts onto that strip INHERITS the
+  // behaviour and the OS claims the gesture before any `pointerdown` handler runs —
+  // dragging the card moved the whole window. This is the regression guard.
+  const handle = chipHandle(sandbox.globalThis.__dshBgmPlaybackStore__)
+  const style = handle.chip().props.style
+  // React spells the CSS property `WebkitAppRegion`; the custom-property form is
+  // also set because a bare `app-region` is what some builds read.
+  const value = style.WebkitAppRegion ?? style.webkitAppRegion ?? style.appRegion
+  assert.equal(value, 'no-drag', 'the card must reclaim the gesture from the title bar')
+})
+
+await check('a press on the card stops propagating to ancestors', () => {
+  // Even with `no-drag`, an ancestor may have its own press semantics. A card drag
+  // must not also start one, so the handlers claim the gesture.
+  const handle = chipHandle(sandbox.globalThis.__dshBgmPlaybackStore__)
+  let onDown = 0
+  let onMove = 0
+  const event = (over) =>
+    Object.assign(
+      {
+        button: 0,
+        pointerId: 7,
+        clientX: 0,
+        clientY: 0,
+        target: { tagName: 'DIV' },
+        currentTarget: { setPointerCapture: () => {}, releasePointerCapture: () => {} },
+        preventDefault: () => {},
+        stopPropagation: () => {},
+      },
+      over,
+    )
+
+  handle.chip().props.onPointerDown(event({ clientX: 1000, clientY: 760, stopPropagation: () => { onDown += 1 } }))
+  assert.equal(onDown, 1, 'the press is claimed')
+  handle.chip().props.onPointerMove(event({ clientX: 300, clientY: 300, stopPropagation: () => { onMove += 1 } }))
+  assert.equal(onMove, 1, 'and so is a real drag')
+})
+
+await check('a press that stays a click still lets the buttons work', () => {
+  // Claiming the gesture must not break the transport buttons: a press that starts
+  // on a <button> is left entirely alone, so the click handler still fires.
+  const handle = chipHandle(sandbox.globalThis.__dshBgmPlaybackStore__)
+  let stopped = 0
+  handle.chip().props.onPointerDown({
+    button: 0,
+    pointerId: 7,
+    clientX: 500,
+    clientY: 500,
+    target: { tagName: 'BUTTON' },
+    currentTarget: { setPointerCapture: () => {} },
+    stopPropagation: () => { stopped += 1 },
+  })
+  assert.equal(stopped, 0, 'a button press is not swallowed by the drag handler')
+})
+
 console.log('\n' + passed + ' passed, ' + failed + ' failed')
 process.exit(failed === 0 ? 0 : 1)

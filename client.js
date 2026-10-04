@@ -842,6 +842,15 @@ window.__ModuleLoader__.load({
           const target = event.target
           const tag = target && target.tagName ? String(target.tagName).toLowerCase() : ''
           if (tag === 'button' || tag === 'input' || tag === 'a' || tag === 'select') return
+
+          // Claim the gesture. The card is a floating overlay, so an ancestor is
+          // free to have its own press semantics — a title bar that drags the
+          // window, a column that starts a selection — and a card drag must not
+          // also trigger them. This complements the CSS `-webkit-app-region:
+          // no-drag` above: that stops the OS window-drag, and this stops anything
+          // in the page.
+          event.stopPropagation?.()
+
           const corner = cornerOf()
           gesture.current = {
             pointerId: event.pointerId,
@@ -874,7 +883,9 @@ window.__ModuleLoader__.load({
           const dy = event.clientY - active.startY
           if (!active.moved && Math.abs(dx) < DRAG_THRESHOLD && Math.abs(dy) < DRAG_THRESHOLD) return
           active.moved = true
+          // Once this is a real drag, nothing upstream may also read the gesture.
           event.preventDefault()
+          event.stopPropagation?.()
           onMove(
             clampPosition(
               { x: event.clientX - active.offsetX, y: event.clientY - active.offsetY },
@@ -1101,6 +1112,29 @@ window.__ModuleLoader__.load({
                       // The overlay layer is click-through; this chip opts back in.
                       pointerEvents: 'auto',
                       maxWidth: '320px',
+                      // Opt OUT of the window-drag region.
+                      //
+                      // DSH's frameless window moves by styling a title-bar strip
+                      // with `-webkit-app-region: drag`:
+                      //
+                      //   [data-windows-titlebar] .BynINW_frame:before {
+                      //     height: var(--dsh-windows-titlebar-height);
+                      //     -webkit-app-region: drag;
+                      //   }
+                      //
+                      // Any child that lands on that strip INHERITS the behaviour, and
+                      // the OS then claims the gesture before a single `pointerdown`
+                      // reaches this element — dragging the card moved the whole
+                      // window instead. The overlay layer spans the frame, so the card
+                      // is only "on" the strip while it happens to sit there, which is
+                      // why this only reproduced near the top of the window.
+                      //
+                      // `no-drag` is the shell's own opt-out, used by every
+                      // interactive element in that bar (`_2H3hWW_toggle`, the
+                      // onboarding cards, the webview). Re-declaring it here is the
+                      // supported way for a child to reclaim the gesture.
+                      WebkitAppRegion: 'no-drag',
+                      appRegion: 'no-drag',
                       // Above every shipped layer. DSH's own scale runs 1000–1100
                       // (`1000` is the mask/dialog layer, `1100` the menu layer),
                       // and a fullscreen document preview or a modal would otherwise

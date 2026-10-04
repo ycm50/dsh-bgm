@@ -111,7 +111,7 @@ dsh-bgm/
 ├── cordis.patch.yml     - insert: { id: dsh-bgm, name: dsh-bgm }
 ├── index.js             Host 半：Config schema + 两条音频路由
 ├── client.js            浏览器半：设置行 + 常驻播放器
-└── _smoke/              99 条离线测试
+└── _smoke/              102 条离线测试
 ```
 
 ### Host 半（`index.js`）
@@ -171,12 +171,12 @@ dsh-bgm/
 
 ## 测试
 
-两个零依赖的离线套件，共 **99 条断言**：
+两个零依赖的离线套件，共 **102 条断言**：
 
 ```bash
 npm test                          # 两个都跑
 node _smoke/logic-smoke.mjs       # 51 条：Host 半
-node _smoke/client-smoke.mjs      # 48 条：浏览器半
+node _smoke/client-smoke.mjs      # 51 条：浏览器半
 ```
 
 **无需 `npm install`。** `index.js` 里的 `@deepseek-ai/schemastery` 是 DSH 提供的
@@ -224,6 +224,9 @@ peer 依赖（本插件绝不自带副本 —— 那是让 Config schema 投影�
    而删文件不改任何设置，于是手里的曲目列表永远是旧的。见下方「已知陷阱」。
 6. **卡片被对话框盖住**（用户报告）—— `zIndex: 40` 是本插件凭空定的数字，
    而 DSH 自己的层级是 1000–1100。见下方「已知陷阱」。
+7. **拖卡片变成了拖整个窗口**（用户报告）—— 卡片飘到窗口顶部时落进了
+   Electron 的窗口拖动区（`-webkit-app-region: drag`），操作系统抢走了手势，
+   我的 `pointerdown` 根本没被调用。见下方「已知陷阱」。
 
 ### 一个关于测试自身的教训
 
@@ -234,7 +237,7 @@ peer 依赖（本插件绝不自带副本 —— 那是让 Config schema 投影�
 
 改 `check` 为 `async` + `await fn()` 之后，**当场有两个既有测试变红**，包括一条
 从写完就没真正执行过的「revision 重试」断言。所以：**新增的每条断言都要反向验证
-一遍（把修复撤掉，确认它会红）**，否则「测试通过」不代表任何事。本文档里三个
+一遍（把修复撤掉，确认它会红）**，否则「测试通过」不代表任何事。本文档里五个
 新测试都做了这个反向验证。
 
 ---
@@ -266,6 +269,33 @@ peer 依赖（本插件绝不自带副本 —— 那是让 Config schema 投影�
 
 这个值是**从打包产物里读出来的**，不是猜的：扫 `app.asar` 里所有 `z-index`
 得到一个层级表，卡片取该表之上。测试里断言 `z-index > 1100`，回退到 `40` 会立刻变红。
+
+## 已知陷阱：Electron 的窗口拖动区会吃掉手势
+
+卡片飘到窗口顶部时**拖不动，拖动变成了拖整个窗口**。
+
+原因在 DSH 的无边框窗口上：外壳用一条标题栏条带让窗口可拖动 ——
+
+```css
+[data-windows-titlebar] .BynINW_frame:before {
+  height: var(--dsh-windows-titlebar-height);
+  -webkit-app-region: drag;
+}
+```
+
+**落在该条带上的任何子元素都会继承这个行为**，然后**操作系统在手势进入 JS 之前
+就把它抢走了** —— 我的 `pointerdown` 连一次都没被调用。这也解释了为什么它只在
+窗口顶部复现：`shell.overlay` 浮层覆盖整帧，卡片只有飘到那条带子上时才"落在"里面。
+
+修复两层：
+
+1. **CSS**：卡片声明 `-webkit-app-region: no-drag`。这是外壳自己的退出方式 ——
+   那条带子上每个可交互元素都这么写（`_2H3hWW_toggle`、onboarding 卡片、webview）。
+2. **JS**：`pointerdown`/真实移动时 `stopPropagation()`，这样即使页面里有别的
+   祖先也带有按压语义，也不会同一次手势被处理两遍。
+
+两条都有回归测试，且都反向验证过（撤掉任一修复，测试立刻变红）。
+`no-drag` 只加在卡片上，**不影响窗口其他地方拖动**。
 
 ## 已验证的运行时事实
 
