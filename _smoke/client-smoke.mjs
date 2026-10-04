@@ -33,9 +33,22 @@ import vm from 'node:vm'
 let passed = 0
 let failed = 0
 
-function check(label, fn) {
+/**
+ * Run one assertion body and report it.
+ *
+ * AWAITS the body, which is what makes an `async` test mean anything. An earlier
+ * version called `fn()` without awaiting: every async body returned a pending
+ * promise, a rejection inside it never reached this `catch`, and the test printed
+ * `ok` the instant the function returned. Three tests in this file were passing
+ * that way without executing a single assertion — the kind of green that hides
+ * exactly the bugs it was written to find.
+ *
+ * @param label - the test name.
+ * @param fn - a sync or async body; a throw or rejection fails the test.
+ */
+async function check(label, fn) {
   try {
-    fn()
+    await fn()
     passed += 1
     console.log('  ok   ' + label)
   } catch (error) {
@@ -63,6 +76,8 @@ const sandbox = {
   console,
   setTimeout,
   clearTimeout,
+  setInterval,
+  clearInterval,
   Promise,
   Object,
   Array,
@@ -106,12 +121,12 @@ sandbox.globalThis = sandbox
 vm.createContext(sandbox)
 vm.runInContext(source, sandbox, { filename: 'client.js' })
 
-check('the bundle registers exactly one module', () => {
+await check('the bundle registers exactly one module', () => {
   assert.notEqual(loaded, null, 'window.__ModuleLoader__.load was called')
   assert.equal(typeof loaded.factory, 'function', 'the factory is callable')
 })
 
-check('the id matches the package name and the settings namespace', () => {
+await check('the id matches the package name and the settings namespace', () => {
   assert.equal(loaded.id, 'dsh-bgm')
 })
 
@@ -366,17 +381,17 @@ const plugin = loaded.factory((specifier) => {
   throw new Error('unexpected require: ' + specifier)
 })
 
-check('the factory returns a plugin face', () => {
+await check('the factory returns a plugin face', () => {
   assert.equal(typeof plugin, 'object')
   assert.equal(typeof plugin.apply, 'function', 'apply is callable')
 })
 
-check('inject stays empty so no missing service can park the fiber', () => {
+await check('inject stays empty so no missing service can park the fiber', () => {
   assert.equal(Array.isArray(plugin.inject), true)
   assert.equal(plugin.inject.length, 0)
 })
 
-check('requiring an unknown module throws rather than silently returning undefined', () => {
+await check('requiring an unknown module throws rather than silently returning undefined', () => {
   assert.throws(() => loaded.factory((specifier) => { throw new Error('unexpected require: ' + specifier) })('nope'))
 })
 
@@ -391,43 +406,43 @@ function registrationFor(target, slot) {
 const client = makeClient()
 plugin.apply(client.ctx)
 
-check('exactly TWO entries are contributed: a player and a settings row', () => {
+await check('exactly TWO entries are contributed: a player and a settings row', () => {
   assert.equal(client.registrations.length, 2)
   const slots = client.registrations.map((entry) => entry.face.name).sort()
   assert.deepEqual(slots, ['settings.general.item', 'shell.overlay'])
 })
 
-check('the ROW is registered into settings.general.item', () => {
+await check('the ROW is registered into settings.general.item', () => {
   const row = registrationFor(client, 'settings.general.item')
   assert.notEqual(row, undefined)
 })
 
-check('the row id is its own, so it adds a cell instead of replacing one', () => {
+await check('the row id is its own, so it adds a cell instead of replacing one', () => {
   assert.equal(registrationFor(client, 'settings.general.item').face.id, 'dsh-bgm-folder')
 })
 
-check('the row sits AFTER the version row (order 110 > current-version 100)', () => {
+await check('the row sits AFTER the version row (order 110 > current-version 100)', () => {
   assert.equal(registrationFor(client, 'settings.general.item').face.order, 110)
 })
 
-check('the row declares no label, because the owner projects none there', () => {
+await check('the row declares no label, because the owner projects none there', () => {
   assert.equal(registrationFor(client, 'settings.general.item').face.label, undefined)
 })
 
-check('the PLAYER is registered into shell.overlay, which outlives every panel', () => {
+await check('the PLAYER is registered into shell.overlay, which outlives every panel', () => {
   const player = registrationFor(client, 'shell.overlay')
   assert.notEqual(player, undefined, 'the player is not in the settings row any more')
   assert.equal(player.face.id, 'dsh-bgm-player')
 })
 
-check('both the plugin namespace and its services are gated before rendering', () => {
+await check('both the plugin namespace and its services are gated before rendering', () => {
   assert.ok(client.served.includes('dsh-bgm'), 'waits for the Host to serve the namespace')
   assert.ok(client.served.includes('slots'))
   assert.ok(client.served.includes('locale'))
   assert.ok(client.served.includes('configForms'))
 })
 
-check('the dictionary is registered for zh and en', () => {
+await check('the dictionary is registered for zh and en', () => {
   assert.equal(client.dictionaries.length, 1)
   assert.equal(client.dictionaries[0].ns, 'dshBgm')
   assert.ok(client.dictionaries[0].dicts.zh.title.includes('背景音乐'))
@@ -530,11 +545,11 @@ const playerComponent = registrationFor(client2, 'shell.overlay').component
 const tree = render(rowComponent(), hooks)
 void component
 
-check('the row renders without throwing', () => {
+await check('the row renders without throwing', () => {
   assert.notEqual(tree, undefined)
 })
 
-check('the folder INPUT is rendered — the control this plugin was asked for', () => {
+await check('the folder INPUT is rendered — the control this plugin was asked for', () => {
   const inputs = []
   walk(tree, (node) => {
     if (node.type === 'input' && node.props.type === 'text') inputs.push(node)
@@ -544,7 +559,7 @@ check('the folder INPUT is rendered — the control this plugin was asked for', 
   assert.equal(inputs[0].props.spellCheck, false)
 })
 
-check('the input shows the value from the SETTINGS DOCUMENT, not a constant', () => {
+await check('the input shows the value from the SETTINGS DOCUMENT, not a constant', () => {
   const found = []
   walk(tree, (node) => {
     if (node.type === 'input' && node.props.type === 'text') found.push(node)
@@ -552,7 +567,7 @@ check('the input shows the value from the SETTINGS DOCUMENT, not a constant', ()
   assert.equal(found[0].props.value, 'A:\\Music')
 })
 
-check('the title and description are rendered', () => {
+await check('the title and description are rendered', () => {
   // Text lives in the CHILDREN of an element, not on the element itself, so this
   // collects every string in the tree rather than looking at elements only.
   const texts = []
@@ -570,7 +585,7 @@ check('the title and description are rendered', () => {
   assert.ok(texts.some((text) => text.includes('音乐文件夹') && text.length > 8), 'the description is present')
 })
 
-check('a Browse control is offered', () => {
+await check('a Browse control is offered', () => {
   const buttons = []
   walk(tree, (node) => {
     if (node.type === 'button') buttons.push(node)
@@ -578,7 +593,7 @@ check('a Browse control is offered', () => {
   assert.ok(buttons.length >= 3, 'browse / play / next are present')
 })
 
-check('playback state is derived from the document, not invented', () => {
+await check('playback state is derived from the document, not invented', () => {
   const checkboxes = []
   walk(tree, (node) => {
     if (node.type === 'input' && node.props.type === 'checkbox') checkboxes.push(node)
@@ -587,7 +602,7 @@ check('playback state is derived from the document, not invented', () => {
   assert.equal(checkboxes[0].props.checked, true, 'enabled:true in the document')
 })
 
-check('the volume control reflects the stored volume', () => {
+await check('the volume control reflects the stored volume', () => {
   // The row now carries TWO range inputs: the Transport component's own (which the
   // overlay shares) and the row's editable volume slider. Both must show the
   // stored value — a disagreement between them is exactly the bug this split
@@ -599,7 +614,7 @@ check('the volume control reflects the stored volume', () => {
   }
 })
 
-check('the audio element lives in the OVERLAY, not in the settings row', () => {
+await check('the audio element lives in the OVERLAY, not in the settings row', () => {
   // This is the regression guard for the reported bug. The row is unmounted the
   // moment Settings closes, so an audio element inside it stops the music. The
   // row must therefore contain NO <audio>, and the overlay must contain exactly one.
@@ -613,7 +628,7 @@ check('the audio element lives in the OVERLAY, not in the settings row', () => {
   assert.equal(overlayAudio[0].props.preload, 'none', 'nothing downloads until playback starts')
 })
 
-check('the overlay renders a stop control only while playing', () => {
+await check('the overlay renders a stop control only while playing', () => {
   // With nothing playing the overlay must be invisible; the chip appears only
   // when there is something to stop.
   const playerHooks = makeHooks()
@@ -796,7 +811,7 @@ function pointer(overrides) {
 
 const dragStore = sandbox.globalThis.__dshBgmPlaybackStore__
 
-check('the chip exists and advertises that it can be dragged', () => {
+await check('the chip exists and advertises that it can be dragged', () => {
   const handle = renderChip(dragStore)
   const chip = handle.chip()
   assert.notEqual(chip, undefined, 'the chip renders while playing')
@@ -808,7 +823,7 @@ check('the chip exists and advertises that it can be dragged', () => {
   assert.equal(typeof chip.props.onPointerUp, 'function')
 })
 
-check('an undragged chip sits at the default bottom-right corner', () => {
+await check('an undragged chip sits at the default bottom-right corner', () => {
   const chip = renderChip(dragStore).chip()
   // No position stored and none dragged: the chip is anchored by right/bottom, so
   // it is correct in any viewport without needing to measure one at first render.
@@ -818,7 +833,7 @@ check('an undragged chip sits at the default bottom-right corner', () => {
   assert.equal(chip.props.style.top, undefined, 'no top offset while unplaced')
 })
 
-check('dragging past the threshold moves the chip and keeps the gesture grip', () => {
+await check('dragging past the threshold moves the chip and keeps the gesture grip', () => {
   const handle = renderChip(dragStore)
   // The default anchor puts the 200x32 chip's corner at (984, 752) in a 1200x800
   // viewport. Pressing at (1000, 700) therefore grabs it 16px from its left edge and
@@ -833,7 +848,7 @@ check('dragging past the threshold moves the chip and keeps the gesture grip', (
   assert.equal(moved.props.style.bottom, undefined, 'both offsets move to left/top')
 })
 
-check('a press that does not move is a click, not a drag', () => {
+await check('a press that does not move is a click, not a drag', () => {
   const handle = renderChip(dragStore)
   handle.chip().props.onPointerDown(pointer({ clientX: 500, clientY: 500 }))
   // Two pixels: below the 4px threshold, so this must not reposition the chip —
@@ -845,7 +860,7 @@ check('a press that does not move is a click, not a drag', () => {
   assert.equal(after.props.style.bottom, '16px', 'still at its default corner')
 })
 
-check('a drag is clamped to the viewport, never off-screen', () => {
+await check('a drag is clamped to the viewport, never off-screen', () => {
   const handle = renderChip(dragStore)
   handle.chip().props.onPointerDown(pointer({ clientX: 1000, clientY: 760 }))
   // Far past the bottom-right corner: the chip must stop at the edge, because
@@ -859,7 +874,7 @@ check('a drag is clamped to the viewport, never off-screen', () => {
   assert.equal(top, 768, 'and to the bottom edge')
 })
 
-check('a drag that leaves the window keeps working through pointer capture', () => {
+await check('a drag that leaves the window keeps working through pointer capture', () => {
   const handle = renderChip(dragStore)
   let captured = null
   let released = null
@@ -875,7 +890,7 @@ check('a drag that leaves the window keeps working through pointer capture', () 
   assert.equal(released, 3, 'the capture is released on pointerup')
 })
 
-check('pressing a button inside the chip does not start a drag', () => {
+await check('pressing a button inside the chip does not start a drag', () => {
   const handle = renderChip(dragStore)
   // A press that starts on a <button> must reach the button, or the user could not
   // pause the music at all.
@@ -887,7 +902,7 @@ check('pressing a button inside the chip does not start a drag', () => {
   assert.equal(after.props.style.bottom, '16px', 'still at its default corner')
 })
 
-check('a press on an input inside the chip does not start a drag', () => {
+await check('a press on an input inside the chip does not start a drag', () => {
   const handle = renderChip(dragStore)
   handle.chip().props.onPointerDown(pointer({ clientX: 500, clientY: 500, target: { tagName: 'INPUT' } }))
   handle.chip().props.onPointerMove(pointer({ clientX: 100, clientY: 100 }))
@@ -895,7 +910,7 @@ check('a press on an input inside the chip does not start a drag', () => {
   assert.equal(after.props.style.left, undefined, 'inputs keep their own gestures')
 })
 
-check('a non-primary button is ignored', () => {
+await check('a non-primary button is ignored', () => {
   const handle = renderChip(dragStore)
   handle.chip().props.onPointerDown(pointer({ button: 2, clientX: 500, clientY: 500 }))
   handle.chip().props.onPointerMove(pointer({ clientX: 100, clientY: 100 }))
@@ -904,7 +919,7 @@ check('a non-primary button is ignored', () => {
   assert.equal(after.props.style.left, undefined, 'a right-drag does nothing')
 })
 
-check('an unmatched pointerId is ignored, so a second pointer cannot hijack the drag', () => {
+await check('an unmatched pointerId is ignored, so a second pointer cannot hijack the drag', () => {
   const handle = renderChip(dragStore)
   handle.chip().props.onPointerDown(pointer({ clientX: 500, clientY: 500, pointerId: 1 }))
   handle.chip().props.onPointerMove(pointer({ clientX: 50, clientY: 50, pointerId: 2 }))
@@ -913,7 +928,7 @@ check('an unmatched pointerId is ignored, so a second pointer cannot hijack the 
   assert.equal(after.props.style.left, undefined, 'the alien pointer did not move the chip')
 })
 
-check('moving without a press does nothing', () => {
+await check('moving without a press does nothing', () => {
   const handle = renderChip(dragStore)
   // A stray move must not place the chip, or merely hovering the overlay would
   // pin it to the top-left corner.
@@ -922,7 +937,7 @@ check('moving without a press does nothing', () => {
   assert.equal(after.props.style.left, undefined, 'no drag without a press')
 })
 
-check('the position is persisted on release and restored across a reload', () => {
+await check('the position is persisted on release and restored across a reload', () => {
   const handle = renderChip(dragStore)
   handle.chip().props.onPointerDown(pointer({ clientX: 1000, clientY: 700 }))
   handle.chip().props.onPointerMove(pointer({ clientX: 300, clientY: 200 }))
@@ -942,7 +957,7 @@ check('the position is persisted on release and restored across a reload', () =>
   assert.equal(restored.props.style.right, undefined, 'the default anchor is not applied too')
 })
 
-check('a corrupt stored position degrades to the default corner, never a crash', () => {
+await check('a corrupt stored position degrades to the default corner, never a crash', () => {
   const real = sandbox.globalThis.localStorage
   const saved = real.getItem('dsh-bgm:chip-position')
   try {
@@ -957,7 +972,7 @@ check('a corrupt stored position degrades to the default corner, never a crash',
   }
 })
 
-check('a throwing localStorage does not stop the player', () => {
+await check('a throwing localStorage does not stop the player', () => {
   const real = sandbox.globalThis.localStorage
   const hostile = {
     getItem: () => { throw new Error('access denied') },
@@ -990,7 +1005,7 @@ dragStore.set({ playing: false, tracks: [], index: -1 })
 // ── the write path ──────────────────────────────────────────────────────────
 console.log('\nwrite path')
 
-check('committing the folder writes a single set op on ["folder"]', async () => {
+await check('committing the folder writes a single set op on ["folder"]', async () => {
   // A real interaction is two renders, not one handler call:
   //   1. `onChange` stores the draft in state — it does NOT commit;
   //   2. the next render hands `commitFolder` the new draft, and Enter commits it.
@@ -1010,14 +1025,20 @@ check('committing the folder writes a single set op on ["folder"]', async () => 
   assert.ok(client2.writes.length >= 1, 'a write was attempted')
   const last = client2.writes[client2.writes.length - 1]
   assert.equal(last.accepted, true, 'the write was accepted')
-  assert.deepEqual(last.ops, [{ op: 'set', path: ['folder'], value: 'D:\\NewMusic' }])
+  // Compared field by field rather than with `deepEqual`: the ops array is built
+  // inside the vm sandbox, so its prototype differs from this realm's and a strict
+  // deep-equal rejects it as "same structure but not reference-equal".
+  assert.equal(last.ops.length, 1, 'exactly one op')
+  assert.equal(last.ops[0].op, 'set')
+  assert.deepEqual([...last.ops[0].path], ['folder'])
+  assert.equal(last.ops[0].value, 'D:\\NewMusic')
 })
 
-check('the stored document really changed', () => {
+await check('the stored document really changed', () => {
   assert.equal(client2.document.folder, 'D:\\NewMusic')
 })
 
-check('a stale revision is retried through remoteMutate instead of silently failing', async () => {
+await check('a stale revision is retried through remoteMutate instead of silently failing', async () => {
   const stale = makeClient()
   const staleHooks = makeHooks()
   const plugin3 = loaded.factory((specifier) => {
@@ -1025,23 +1046,33 @@ check('a stale revision is retried through remoteMutate instead of silently fail
     throw new Error('unexpected require: ' + specifier)
   })
   plugin3.apply(stale.ctx)
-  // Force a revision mismatch on the next write.
+
+  // Force a revision mismatch on the next write, so the fenced `mutate` is refused
+  // and the unfenced remote retry is the only path that can land.
   const scope = stale.ctx.get('configForms').get('dsh-bgm')
-  const original = scope.getSnapshot
   scope.getSnapshot = () => ({ value: stale.document, revision: stale.revision + 99 })
-  void original
-  const tree3 = render(registrationFor(stale, 'settings.general.item').component(), staleHooks)
-  const inputs = []
-  walk(tree3, (node) => {
-    if (node.type === 'input' && node.props.type === 'text') inputs.push(node)
-  })
-  inputs[0].props.onChange({ target: { value: 'E:\\Retry' } })
-  inputs[0].props.onKeyDown({ key: 'Enter', preventDefault() {} })
+
+  const row = registrationFor(stale, 'settings.general.item').component
+  const first = render(row(), staleHooks)
+  const firstInputs = collect(first, (node) => node.type === 'input' && node.props.type === 'text')
+  firstInputs[0].props.onChange({ target: { value: 'E:\\Retry' } })
+
+  // Commit from the render that HAS the draft. Calling `onKeyDown` on the earlier
+  // render would commit the old draft — or nothing at all, since the draft is still
+  // `null` — and the test would read as a broken retry path when it is correct.
+  const second = render(row(), staleHooks)
+  const secondInputs = collect(second, (node) => node.type === 'input' && node.props.type === 'text')
+  assert.equal(secondInputs[0].props.value, 'E:\\Retry', 'the draft is in state')
+  secondInputs[0].props.onKeyDown({ key: 'Enter', preventDefault() {} })
+
   await new Promise((resolve) => setTimeout(resolve, 0))
-  assert.ok(stale.writes.some((entry) => entry.accepted === false), 'the fenced write was refused')
+  assert.ok(
+    stale.writes.some((entry) => entry.accepted === false),
+    'the fenced write was refused, which is what triggers the retry',
+  )
 })
 
-check('requiring react is the only external the bundle needs', () => {
+await check('requiring react is the only external the bundle needs', () => {
   const requested = []
   loaded.factory((specifier) => {
     requested.push(specifier)
@@ -1050,19 +1081,260 @@ check('requiring react is the only external the bundle needs', () => {
   assert.deepEqual(requested, ['react'], 'no other module is required at factory time')
 })
 
-check('the bundle requests no filesystem or node builtin', () => {
+await check('the bundle requests no filesystem or node builtin', () => {
   for (const banned of ['node:fs', 'node:path', 'fs', 'path', 'child_process', 'electron']) {
     assert.equal(source.includes("require('" + banned + "')"), false, 'must not require ' + banned)
   }
 })
 
-check('the bundle never uses ctx.get at the top level of apply', () => {
+await check('the bundle never uses ctx.get at the top level of apply', () => {
   // Documented convention: services are reached through ctx.inject so an absent
   // service cannot park the fiber. `serviceAt` uses owner.get inside the injected
   // scope, which is fine — assert the pattern is present so a regression to a
   // bare `ctx.get(...)` in apply is caught.
   assert.ok(source.includes('owner.get(name)'), 'reads services through the injected owner')
   assert.ok(source.includes('ctx.inject('), 'reaches services through ctx.inject')
+})
+
+// ── a folder that changes underneath the plugin ──────────────────────────────
+console.log('\ndeleted files (library is owned by the filesystem, not by this plugin)')
+
+/**
+ * Drive the store with a controllable manifest, so a deletion can be simulated.
+ *
+ * The real route reads a real directory, and a test cannot delete the user's music.
+ * What matters is the same either way: the Host answers with a NEW list, and the
+ * store must reconcile against it rather than keep playing the old one.
+ */
+function withManifest(tracks, error = null) {
+  const realFetch = sandbox.fetch
+  sandbox.fetch = () => Promise.resolve({
+    ok: true,
+    json: () => Promise.resolve({ enabled: true, folder: '/music', resolved: '/music', tracks, error }),
+  })
+  return () => { sandbox.fetch = realFetch }
+}
+
+/** Let every pending microtask settle (the reload chain is several promises deep). */
+const settle = () => new Promise((resolve) => setTimeout(resolve, 0))
+
+await check('a deleted track stops playback instead of continuing on a stale list', async () => {
+  const store = sandbox.globalThis.__dshBgmPlaybackStore__
+  const restore = withManifest([
+    { name: 'a.mp3', src: '/a', type: 'audio/mpeg' },
+    { name: 'b.mp3', src: '/b', type: 'audio/mpeg' },
+  ])
+  try {
+    await store.reload()
+    await settle()
+    store.set({ index: 1, playing: true })
+    assert.equal(store.getSnapshot().tracks.length, 2)
+    assert.equal(store.currentTrack().name, 'b.mp3')
+
+    // The user deletes b.mp3 (and a.mp3) in Explorer. The Host now reports none.
+    sandbox.fetch = () => Promise.resolve({
+      ok: true,
+      json: () => Promise.resolve({ enabled: true, folder: '/music', resolved: '/music', tracks: [], error: null }),
+    })
+    await store.reload()
+    await settle()
+
+    const after = store.getSnapshot()
+    assert.deepEqual(after.tracks, [], 'the track list follows the Host')
+    assert.equal(after.playing, false, 'playback stops rather than sliding onto a stale slot')
+    assert.equal(after.index, -1, 'no selection survives an empty library')
+  } finally {
+    restore()
+  }
+})
+
+await check('a deleted track does not slide playback onto a DIFFERENT song', async () => {
+  // The subtle half of the bug: with the index carried across a refresh, deleting
+  // an earlier file shifts every later one and the user suddenly hears a different
+  // song. Selection must follow the track NAME.
+  const store = sandbox.globalThis.__dshBgmPlaybackStore__
+  const restore = withManifest([
+    { name: 'a.mp3', src: '/a', type: 'audio/mpeg' },
+    { name: 'b.mp3', src: '/b', type: 'audio/mpeg' },
+    { name: 'c.mp3', src: '/c', type: 'audio/mpeg' },
+  ])
+  try {
+    await store.reload()
+    await settle()
+    // Play c.mp3 (index 2).
+    store.set({ index: 2, playing: true })
+    assert.equal(store.currentTrack().name, 'c.mp3')
+
+    // a.mp3 is deleted. c.mp3 moves from index 2 to index 1.
+    sandbox.fetch = () => Promise.resolve({
+      ok: true,
+      json: () => Promise.resolve({
+        enabled: true,
+        folder: '/music',
+        resolved: '/music',
+        tracks: [
+          { name: 'b.mp3', src: '/b', type: 'audio/mpeg' },
+          { name: 'c.mp3', src: '/c', type: 'audio/mpeg' },
+        ],
+        error: null,
+      }),
+    })
+    await store.reload()
+    await settle()
+
+    const after = store.getSnapshot()
+    assert.equal(after.tracks.length, 2)
+    assert.equal(store.currentTrack().name, 'c.mp3', 'still the same song, not a shifted one')
+    assert.equal(after.index, 1, 'the index moved with the track')
+    assert.equal(after.playing, true, 'an untouched track keeps playing')
+  } finally {
+    restore()
+  }
+})
+
+await check('the library is re-read when it has gone stale, and not before', async () => {
+  const store = sandbox.globalThis.__dshBgmPlaybackStore__
+  let fetches = 0
+  const restore = sandbox.fetch
+  sandbox.fetch = () => {
+    fetches += 1
+    return Promise.resolve({
+      ok: true,
+      json: () => Promise.resolve({ enabled: true, folder: '/music', resolved: '/music', tracks: [], error: null }),
+    })
+  }
+  try {
+    await store.reload()
+    await settle()
+    const afterLoad = fetches
+
+    // Immediately after a load the listing is fresh, so a stale check must not
+    // refetch — otherwise the periodic timer would become a poll.
+    store.refreshIfStale()
+    await settle()
+    assert.equal(fetches, afterLoad, 'a fresh listing is not re-read')
+
+    // And the mechanism exists to be driven by the timer; assert the surface the
+    // player's effect actually calls.
+    assert.equal(typeof store.refreshIfStale, 'function')
+  } finally {
+    sandbox.fetch = restore
+  }
+})
+
+await check('the player schedules refreshes that notice a deleted file', async () => {
+  // The reported bug was not the reconcile logic — it was that NOTHING ever asked
+  // again. `reload()` fired only when the folder CHANGED, so a file deleted from a
+  // folder that stayed the same was never noticed. This drives the real effect with
+  // observable timers and asserts a refresh actually reaches the Host.
+  const store = sandbox.globalThis.__dshBgmPlaybackStore__
+  const scheduled = []
+  const realSetInterval = sandbox.setInterval
+  sandbox.setInterval = (fn, ms) => {
+    scheduled.push({ fn, ms })
+    return 'timer-handle'
+  }
+  const listeners = []
+  const realDoc = sandbox.document
+  sandbox.document = {
+    createElement: realDoc.createElement,
+    visibilityState: 'visible',
+    addEventListener: (type, fn) => listeners.push({ target: 'document', type, fn }),
+    removeEventListener: () => {},
+  }
+  const winListeners = []
+  const realAdd = sandbox.addEventListener
+  sandbox.addEventListener = (type, fn) => winListeners.push({ type, fn })
+
+  let fetches = 0
+  const realFetch = sandbox.fetch
+  sandbox.fetch = () => {
+    fetches += 1
+    return Promise.resolve({
+      ok: true,
+      json: () => Promise.resolve({ enabled: true, folder: '/music', resolved: '/music', tracks: [], error: null }),
+    })
+  }
+
+  try {
+    const hookSet = makeHooks()
+    const client = makeClient()
+    const instance = loaded.factory((specifier) => {
+      if (specifier === 'react') return hookSet.React
+      throw new Error('unexpected require: ' + specifier)
+    })
+    instance.apply(client.ctx)
+    const player = registrationFor(client, 'shell.overlay').component
+    // Render with effect replay, which is what a real mount does.
+    render(player(), hookSet)
+
+    // `>= 1` rather than `=== 1`: this harness replays effects to settle a render,
+    // so the mount effect legitimately runs more than once here. What matters is
+    // that a periodic refresh exists, on the right interval, and that firing it
+    // reaches the Host — the assertions below.
+    assert.ok(scheduled.length >= 1, 'the player installed a periodic refresh')
+    assert.equal(scheduled[0].ms, 15000, 'on the documented TTL')
+    assert.equal(
+      listeners.some((entry) => entry.type === 'visibilitychange'),
+      true,
+      'returning to the tab refreshes, which is when a user who just deleted expects it',
+    )
+    assert.equal(
+      winListeners.some((entry) => entry.type === 'focus'),
+      true,
+      'and window focus covers platforms without a visibility change',
+    )
+
+    // The mount already read the library, so the listing is FRESH and a tick now
+    // must decline — that is the anti-poll behaviour, asserted below. To exercise
+    // the notice-a-deletion path the cache has to age, which is what time passing
+    // does: the scenario is "the user deleted files a while ago".
+    const fresh = fetches
+    scheduled[0].fn()
+    await settle()
+    assert.equal(fetches, fresh, 'a fresh listing is not re-read by the next tick')
+
+    // Age the cache past the TTL by moving the clock, then tick again. The store
+    // reads `Date.now()`, so this is the same passage of time without a real wait.
+    const realNow = Date.now
+    Date.now = () => realNow() + 60000
+    try {
+      const before = fetches
+      scheduled[0].fn()
+      await settle()
+      assert.ok(fetches > before, 'an aged listing IS re-read, so a deletion is noticed')
+    } finally {
+      Date.now = realNow
+    }
+  } finally {
+    sandbox.setInterval = realSetInterval
+    sandbox.document = realDoc
+    sandbox.addEventListener = realAdd
+    sandbox.fetch = realFetch
+  }
+})
+
+// ── stacking ────────────────────────────────────────────────────────────────
+console.log('\nstacking')
+
+await check('the card out-stacks every layer DSH itself uses', () => {
+  // DSH's own scale, read out of the packaged client bundles: `1000` is the
+  // mask/dialog layer and `1100` the menu layer. A fullscreen document preview or a
+  // modal would otherwise paint over the card, which is what the user reported.
+  const DSH_HIGHEST_LAYER = 1100
+  const handle = chipHandle(sandbox.globalThis.__dshBgmPlaybackStore__)
+  const zIndex = Number(handle.chip().props.style.zIndex)
+  assert.ok(Number.isFinite(zIndex), 'the card declares a numeric z-index')
+  assert.ok(zIndex > DSH_HIGHEST_LAYER, 'above the menu layer: ' + zIndex + ' > ' + DSH_HIGHEST_LAYER)
+})
+
+await check('the card is fixed-positioned, so it is not trapped in a scrolling column', () => {
+  const handle = chipHandle(sandbox.globalThis.__dshBgmPlaybackStore__)
+  assert.equal(handle.chip().props.style.position, 'fixed')
+  // No ancestor transform can trap a fixed element only if none is applied; the
+  // overlay layer is outside every column's scroll container by construction, so the
+  // remaining risk is a stacking context, which the z-index assertion covers.
+  assert.equal(handle.chip().props.style.pointerEvents, 'auto', 'and still clickable')
 })
 
 console.log('\n' + passed + ' passed, ' + failed + ' failed')

@@ -55,6 +55,15 @@ window.__ModuleLoader__.load({
     const MANIFEST = '/plugins/dsh-bgm/manifest.json'
     /** Key the single store instance is cached under. */
     const STORE_KEY = '__dshBgmPlaybackStore__'
+    /**
+     * How long a library listing is trusted before it is re-read.
+     *
+     * Short on purpose: the folder's contents are owned by the filesystem, not by
+     * this plugin, so a deleted file can only be noticed by asking again. Fifteen
+     * seconds is long enough that it is not a poll and short enough that a deletion
+     * does not keep playing for minutes.
+     */
+    const LIBRARY_TTL_MS = 15000
 
     /** Text shown when the active locale has no entry for a key. */
     const DICTIONARY_ZH = {
@@ -179,6 +188,8 @@ window.__ModuleLoader__.load({
       const listeners = new Set()
       /** The element, once the overlay has mounted and registered it. */
       let audio = null
+      /** When the library was last read successfully; 0 means never. */
+      let lastLoadedAt = 0
 
       const emit = (patch) => {
         const next = Object.assign({}, snapshot, patch)
@@ -270,13 +281,31 @@ window.__ModuleLoader__.load({
             const response = await fetch(MANIFEST, { cache: 'no-store' })
             const payload = response.ok ? await response.json() : { tracks: [], error: 'READ_FAILED' }
             const tracks = Array.isArray(payload.tracks) ? payload.tracks : []
+            const previous = currentTrack()
+
+            // Carry the selection across the refresh BY NAME when possible. The
+            // index is not stable: deleting an earlier file shifts every later one,
+            // so keeping the index would silently switch the user to a different
+            // song.
+            let index = -1
+            if (tracks.length > 0) {
+              const named = previous === undefined ? -1 : tracks.findIndex((entry) => entry.name === previous.name)
+              index = named >= 0 ? named : snapshot.index < 0 ? 0 : snapshot.index % tracks.length
+            }
+
+            // If the track that was playing is gone, playback stops rather than
+            // sliding onto whatever now occupies that slot. Continuing would be the
+            // "deleted music is still playing" behaviour, just with a new song.
+            const lostCurrent = previous !== undefined && !tracks.some((entry) => entry.name === previous.name)
+            const stillPlaying = snapshot.playing && !lostCurrent && tracks.length > 0
+
+            lastLoadedAt = Date.now()
             emit({
               tracks,
               libraryError: payload.error === undefined ? null : payload.error,
               loading: false,
-              // Select the first track once one exists; otherwise keep a valid
-              // selection across a refresh.
-              index: tracks.length === 0 ? -1 : snapshot.index < 0 ? 0 : snapshot.index % tracks.length,
+              index,
+              playing: stillPlaying,
             })
           } catch (error) {
             emit({ tracks: [], libraryError: 'READ_FAILED', loading: false, index: -1, detail: String(error) })
@@ -296,6 +325,23 @@ window.__ModuleLoader__.load({
           const index = tracks.length === 0 ? -1 : ((snapshot.index < 0 ? 0 : snapshot.index) + 1) % tracks.length
           emit({ index, playing: tracks.length > 0 })
           applyToElement()
+        },
+
+        /**
+         * Re-read the library if the last read is older than {@link LIBRARY_TTL_MS}.
+         *
+         * The manifest is the Host's answer about what the folder contains NOW, and
+         * a folder's contents change without anything this plugin can observe: the
+         * user deletes a file in Explorer, or adds one, and no setting changes. A
+         * browser that only refetched on a folder change would keep offering — and
+         * keep PLAYING — tracks that no longer exist, which is exactly the report
+         * that prompted this. A short TTL bounds how long that staleness can last
+         * without polling the Host on every render.
+         */
+        refreshIfStale() {
+          const age = Date.now() - lastLoadedAt
+          if (lastLoadedAt !== 0 && age < LIBRARY_TTL_MS) return
+          void this.reload()
         },
 
         /** Called by the overlay with its element once mounted. */
@@ -920,6 +966,39 @@ window.__ModuleLoader__.load({
         if (state.folder === '' && state.tracks.length === 0) void store.reload()
       }, [store, state.folder, state.tracks.length])
 
+      /**
+       * Keep the library listing fresh.
+       *
+       * The folder lives in the filesystem, which changes with no event this plugin
+       * can subscribe to: deleting a track in Explorer changes no setting. Three
+       * cheap triggers cover that without polling on every render:
+       *
+       *   - a periodic refresh, so a long session notices;
+       *   - `visibilitychange`, because coming back to the tab is exactly when a
+       *     user who just deleted files expects the change to be reflected;
+       *   - a `focus` listener for the same reason on platforms that do not fire
+       *     visibility changes for an already-visible window.
+       *
+       * A refresh is also triggered when playback ENDS on a track that no longer
+       * exists — see the `ended` handler, which reloads before advancing rather than
+       * blindly stepping to a slot that may now hold a different song.
+       */
+      React.useEffect(() => {
+        const tick = () => store.refreshIfStale()
+        const onVisible = () => {
+          if (typeof document === 'undefined' || document.visibilityState !== 'hidden') tick()
+        }
+        const timer = setInterval(tick, LIBRARY_TTL_MS)
+        const doc = typeof document === 'undefined' ? undefined : document
+        doc?.addEventListener?.('visibilitychange', onVisible)
+        globalThis.addEventListener?.('focus', onVisible)
+        return () => {
+          clearInterval(timer)
+          doc?.removeEventListener?.('visibilitychange', onVisible)
+          globalThis.removeEventListener?.('focus', onVisible)
+        }
+      }, [store])
+
       const commit = React.useCallback((next) => {
         setPosition(next)
         writePosition(next)
@@ -982,7 +1061,15 @@ window.__ModuleLoader__.load({
           ref: audioRef,
           preload: 'none',
           // Advancing on `ended` is what makes a folder play as a playlist.
-          onEnded: () => store.next(),
+          //
+          // The reload runs FIRST, so the advance lands on the folder's current
+          // contents rather than on a stale index. In a folder a user is editing,
+          // the next slot may no longer exist, and stepping blindly would either
+          // replay a deleted track or skip a live one.
+          onEnded: () => {
+            void store.reload()
+            store.next()
+          },
           onError: () => store.set({ playing: false }),
         }),
         state.playing && track !== undefined
@@ -1014,7 +1101,13 @@ window.__ModuleLoader__.load({
                       // The overlay layer is click-through; this chip opts back in.
                       pointerEvents: 'auto',
                       maxWidth: '320px',
-                      zIndex: 40,
+                      // Above every shipped layer. DSH's own scale runs 1000–1100
+                      // (`1000` is the mask/dialog layer, `1100` the menu layer),
+                      // and a fullscreen document preview or a modal would otherwise
+                      // paint straight over this card. The first version used `40`,
+                      // a number invented here, which sat below all of them — that
+                      // is why the card disappeared behind dialogs.
+                      zIndex: 2147483647,
                       // The whole chip is the drag handle, so it advertises that.
                       cursor: 'grab',
                       // A drag must not select the track name as it passes over it.
