@@ -1,0 +1,13 @@
+# dsh-bgm bundle layer: one Host row over the current profile.
+#
+# The `id` below is NOT decoration: under DSH 0.2.0-rc.2 a settings namespace IS a
+# plugin entry, so `dsh-bgm` here is exactly the namespace that
+# `@deepseek-ai/dsh-settings` describes (from this module's `Config` export) and
+# exactly the string `client.js` spells in `SETTINGS_NAMESPACE`. Renaming it moves
+# the namespace and silently orphans the browser row.
+#
+# No config is carried here on purpose: every field is editable from the General
+# settings page, and a value written there is committed into the running process.
+- insert:
+    - id: dsh-bgm
+      name: dsh-bgm

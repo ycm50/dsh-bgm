@@ -1,0 +1,24 @@
+# 统一按 LF 存储，避免 Windows 提交把整个仓库变成 CRLF 差异。
+* text=auto eol=lf
+
+# 明确二进制，防止 Git 尝试做行尾转换
+*.png binary
+*.jpg binary
+*.jpeg binary
+*.gif binary
+*.webp binary
+*.ico binary
+*.mp3 binary
+*.wav binary
+*.flac binary
+*.m4a binary
+*.ogg binary
+*.webm binary
+*.woff binary
+*.woff2 binary
+*.ttf binary
+*.zip binary
+
+# 这些文件在合并时不该被自动处理
+package-lock.json -diff linguist-generated
+pnpm-lock.yaml    -diff linguist-generated

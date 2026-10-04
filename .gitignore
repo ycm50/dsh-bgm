@@ -1,0 +1,32 @@
+# 依赖与构建产物
+node_modules/
+.pnpm-store/
+
+# 本插件是纯 JS，无构建步骤；这些是备用忽略项，防止将来误提交产物
+lib/
+dist/
+*.tsbuildinfo
+
+# 编辑器与 IDE
+.vscode/
+.idea/
+*.swp
+*.swo
+
+# 操作系统
+.DS_Store
+Thumbs.db
+desktop.ini
+
+# 日志与临时文件
+*.log
+npm-debug.log*
+pnpm-debug.log*
+yarn-error.log*
+*.tmp
+*.bak
+*.orig
+
+# 测试运行期产生的临时报告
+_smoke/*-report.json
+_smoke/out/

@@ -1,0 +1,56 @@
+{
+  "name": "dsh-bgm",
+  "version": "0.1.0",
+  "description": "DSH 背景音乐插件：指定一个音乐文件夹，在对话中播放其中的音乐；通用设置页新增「背景音乐文件夹」输入框，播放时可拖动卡片。",
+  "license": "MIT",
+  "type": "module",
+  "main": "./index.js",
+  "exports": {
+    ".": "./index.js",
+    "./client": "./client.js",
+    "./cordis.patch.yml": "./cordis.patch.yml",
+    "./package.json": "./package.json"
+  },
+  "files": [
+    "index.js",
+    "client.js",
+    "cordis.patch.yml",
+    "README.md",
+    "LICENSE"
+  ],
+  "scripts": {
+    "test": "node _smoke/logic-smoke.mjs && node _smoke/client-smoke.mjs",
+    "test:host": "node _smoke/logic-smoke.mjs",
+    "test:client": "node _smoke/client-smoke.mjs"
+  },
+  "engines": {
+    "dsh": ">=0.2.0-rc.1"
+  },
+  "peerDependencies": {
+    "@deepseek-ai/schemastery": "*"
+  },
+  "dsh": {
+    "bundle": {
+      "patch": "./cordis.patch.yml"
+    },
+    "client": {
+      "platform": "web"
+    }
+  },
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/ycm50/dsh-bgm.git"
+  },
+  "homepage": "https://github.com/ycm50/dsh-bgm#readme",
+  "bugs": {
+    "url": "https://github.com/ycm50/dsh-bgm/issues"
+  },
+  "keywords": [
+    "deepseek-harness",
+    "dsh",
+    "plugin",
+    "bgm",
+    "music",
+    "audio"
+  ]
+}
