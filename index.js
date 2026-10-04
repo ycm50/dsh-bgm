@@ -96,15 +96,28 @@ const DEFAULT_SETTINGS = {
   enabled: true,
   /** Playback volume, 0..1. */
   volume: 0.5,
+  /** How the next track is chosen. Mirrors the browser half's default. */
+  mode: 'sequence',
 }
+
+/**
+ * Playback modes, in the order the card cycles them.
+ *
+ * Duplicated from `client.js` rather than imported: the two halves are separate
+ * bundles and the browser half cannot import a Host module. This list is the single
+ * source for the SCHEMA's accepted values; the card's own list must match, and a
+ * mismatch would surface as a refused write, which the row reports rather than
+ * hiding.
+ */
+const PLAY_MODES = ['sequence', 'shuffle', 'single']
 
 /**
  * This entry's Host configuration schema.
  *
  * Every field is volatile, because the settings service projects volatile fields
  * and nothing else. The field names are the contract with `client.js`: the row
- * writes `['folder']`, `['enabled']` and `['volume']` through `configForms`, and
- * this schema is what accepts them.
+ * writes `['folder']`, `['enabled']`, `['volume']` and `['mode']` through
+ * `configForms`, and this schema is what accepts them.
  *
  * `folder` is a plain string rather than a validated path: any string can be
  * stored (a user may type a path before the drive exists), and an unusable folder
@@ -115,6 +128,15 @@ export const Config = z.object({
   folder: live(z.string().default(DEFAULT_SETTINGS.folder)),
   enabled: live(z.boolean().default(DEFAULT_SETTINGS.enabled)),
   volume: live(z.number().min(0).max(1).default(DEFAULT_SETTINGS.volume)),
+  /**
+   * How the next track is chosen.
+   *
+   * Stored rather than kept in the browser because it is a preference, not
+   * playback state: closing the window should not silently reset the user back to
+   * sequential. The union is built from {@link PLAY_MODES} so the schema and the
+   * card cannot disagree about the accepted values.
+   */
+  mode: live(z.union([...PLAY_MODES]).default(DEFAULT_SETTINGS.mode)),
 })
 
 /** Package name the loader mounts this row as. Also the settings namespace. */
@@ -469,6 +491,7 @@ export function apply(ctx, config) {
 export const internals = {
   ROUTE,
   AUDIO_TYPES,
+  PLAY_MODES,
   audioType,
   resolveFolder,
   listTracks,

@@ -38,8 +38,7 @@ window.__ModuleLoader__.load({
     const React = require('react')
 
     /** The settings row: one preference row inside the General section. */
-    const ROW_SLOT = 'settings.general.item'
-    /** This row's cell key. A fresh id is added beside the shipped entries. */
+    const ROW_SLOT = 'settings.general.item'    /** This row's cell key. A fresh id is added beside the shipped entries. */
     const ROW_ID = 'dsh-bgm-folder'
     /** Position among the General rows: after `current-version` (order 100). */
     const ROW_ORDER = 110
@@ -55,6 +54,25 @@ window.__ModuleLoader__.load({
     const MANIFEST = '/plugins/dsh-bgm/manifest.json'
     /** Key the single store instance is cached under. */
     const STORE_KEY = '__dshBgmPlaybackStore__'
+
+    /**
+     * The playback modes, in the order the mode control cycles through them.
+     *
+     *   - `sequence` — play the folder in name order, wrapping at the end.
+     *   - `shuffle`  — play the folder in a randomised order, each track once per
+     *                  cycle. A shuffle that could repeat before exhausting the list
+     *                  would make "next" surprising in exactly the way users complain
+     *                  about, so the order is materialised rather than picked per
+     *                  step.
+     *   - `single`   — repeat the current track forever.
+     *
+     * A plain list rather than an enum object: the mode control only ever needs to
+     * cycle, and `PLAY_MODES[(i + 1) % PLAY_MODES.length]` is the whole transition.
+     */
+    const PLAY_MODES = ['sequence', 'shuffle', 'single']
+
+    /** The mode a fresh installation starts in. */
+    const DEFAULT_MODE = 'sequence'
     /**
      * How long a library listing is trusted before it is re-read.
      *
@@ -85,6 +103,14 @@ window.__ModuleLoader__.load({
       now: '正在播放：{name}',
       enable: '播放背景音乐',
       dragHint: '拖动可移动到任意位置',
+      modeSequence: '顺序播放',
+      modeShuffle: '随机播放',
+      modeSingle: '单曲循环',
+      modeSequenceGlyph: '顺序',
+      modeShuffleGlyph: '随机',
+      modeSingleGlyph: '单曲',
+      modeHint: '当前：{mode}（点击切换 顺序 / 随机 / 单曲循环）',
+      modeLabel: '播放模式',
     }
 
     const DICTIONARY_EN = {
@@ -106,6 +132,14 @@ window.__ModuleLoader__.load({
       now: 'Playing: {name}',
       enable: 'Play background music',
       dragHint: 'Drag to move anywhere',
+      modeSequence: 'Sequential',
+      modeShuffle: 'Shuffle',
+      modeSingle: 'Repeat one',
+      modeSequenceGlyph: 'Seq',
+      modeShuffleGlyph: 'Shuf',
+      modeSingleGlyph: 'One',
+      modeHint: 'Now: {mode} (click to cycle sequential / shuffle / repeat one)',
+      modeLabel: 'Play mode',
     }
 
     /**
@@ -184,6 +218,19 @@ window.__ModuleLoader__.load({
         loading: false,
         index: -1,
         playing: false,
+        /** One of {@link PLAY_MODES}: how the NEXT track is chosen. */
+        mode: 'sequence',
+        /**
+         * Shuffled playback order, as indices into `tracks`.
+         *
+         * Empty in `sequence` mode. Rebuilt when shuffle starts, when the library is
+         * re-read, and when the current track changes by hand — a shuffle order that
+         * outlived the list it was drawn from would be a source of duplicates and
+         * dead indices.
+         */
+        order: [],
+        /** Position within `order` while shuffling. */
+        orderIndex: -1,
       }
       const listeners = new Set()
       /** The element, once the overlay has mounted and registered it. */
@@ -215,6 +262,92 @@ window.__ModuleLoader__.load({
         const tracks = snapshot.tracks
         if (tracks.length === 0) return undefined
         return tracks[(snapshot.index < 0 ? 0 : snapshot.index) % tracks.length]
+      }
+
+      /**
+       * Build a shuffled order over the current library.
+       *
+       * A materialised permutation rather than a random pick per step, because a
+       * per-step pick repeats tracks before exhausting the folder — the single most
+       * common complaint about shuffle. Fisher–Yates so every permutation is equally
+       * likely.
+       *
+       * The CURRENT track is placed first, so switching to shuffle does not restart
+       * the song the user is already listening to.
+       *
+       * @param length - how many tracks there are.
+       * @returns the order, and the position within it of the current track.
+       */
+      const buildOrder = (length) => {
+        const order = Array.from({ length }, (_, i) => i)
+        for (let i = order.length - 1; i > 0; i -= 1) {
+          const j = Math.floor(Math.random() * (i + 1))
+          ;[order[i], order[j]] = [order[j], order[i]]
+        }
+        if (length === 0) return { order, orderIndex: -1 }
+        const current = snapshot.index < 0 ? 0 : snapshot.index % length
+        const at = order.indexOf(current)
+        if (at > 0) {
+          // Move the current track to the front, keeping the rest of the shuffled
+          // relative order intact.
+          order.splice(at, 1)
+          order.unshift(current)
+        }
+        return { order, orderIndex: 0 }
+      }
+
+      /**
+       * The index to play next, for the current mode.
+       *
+       * `sequence` and `shuffle` both wrap, so a folder loops; `single` stays put,
+       * which is what makes it repeat forever rather than advance. The ORDER is what
+       * differs between the first two: sequence walks the library, shuffle walks a
+       * permutation of it.
+       *
+       * @param automatic - true when advancing because a track ENDED, false for an
+       *   explicit "next" press. In `single` mode a press skips to the next track
+       *   (the user asked to move on) while an automatic advance repeats it (the mode
+       *   they chose says so) — without this distinction, single-track repeat would
+       *   make the Next button do nothing.
+       * @returns the next index, or -1 when there is nothing to play.
+       */
+      const nextIndexFor = (automatic) => {
+        const length = snapshot.tracks.length
+        if (length === 0) return -1
+        if (snapshot.mode === 'single' && automatic) {
+          return snapshot.index < 0 ? 0 : snapshot.index % length
+        }
+        if (snapshot.mode === 'shuffle') {
+          // A usable order must cover exactly the current library: one built for a
+          // longer folder would carry dead indices, one built for a shorter folder
+          // would never reach the new tracks.
+          const usable = snapshot.order.length === length && snapshot.orderIndex >= 0
+          if (!usable) {
+            const rebuilt = buildOrder(length)
+            return rebuilt.order[0] ?? 0
+          }
+          const position = (snapshot.orderIndex + 1) % snapshot.order.length
+          return snapshot.order[position]
+        }
+        return (snapshot.index < 0 ? 0 : snapshot.index + 1) % length
+      }
+
+      /**
+       * Advance the shuffle cursor to the position of one index.
+       *
+       * Needed whenever the current track changes by any route other than the
+       * shuffle cursor itself (a manual pick, a library refresh) — otherwise the
+       * cursor keeps pointing at the old position and "next" jumps backwards.
+       *
+       * @param index - the track index that is now current.
+       * @returns the patch fields to merge.
+       */
+      const orderPatchFor = (index) => {
+        if (snapshot.mode !== 'shuffle') return {}
+        const length = snapshot.tracks.length
+        if (snapshot.order.length !== length) return buildOrder(length)
+        const at = snapshot.order.indexOf(index)
+        return at < 0 ? buildOrder(length) : { orderIndex: at }
       }
 
       /** Reconcile the one media element with the current state. */
@@ -268,10 +401,16 @@ window.__ModuleLoader__.load({
           const folder = typeof value.folder === 'string' ? value.folder : ''
           const enabled = value.enabled !== false
           const volume = typeof value.volume === 'number' ? value.volume : 0.5
+          const mode = PLAY_MODES.includes(value.mode) ? value.mode : DEFAULT_MODE
           const folderChanged = folder !== snapshot.folder
+          const modeChanged = mode !== snapshot.mode
           emit(Object.assign({ folder, enabled, volume }, folderChanged ? { index: -1 } : {}))
           applyToElement()
           if (folderChanged) void this.reload()
+          // Route a stored mode change through `setMode`, so entering shuffle builds
+          // an order and leaving it drops one. Assigning the field directly would
+          // leave the order inconsistent with the mode that is supposed to walk it.
+          if (modeChanged) this.setMode(mode)
         },
 
         /** Re-read the library manifest from the Host. */
@@ -300,15 +439,26 @@ window.__ModuleLoader__.load({
             const stillPlaying = snapshot.playing && !lostCurrent && tracks.length > 0
 
             lastLoadedAt = Date.now()
-            emit({
-              tracks,
-              libraryError: payload.error === undefined ? null : payload.error,
-              loading: false,
-              index,
-              playing: stillPlaying,
-            })
+            // A shuffle order is drawn from a specific track list, so any refresh
+            // that changes the list invalidates it: an order built for a longer
+            // folder would carry dead indices and one built for a shorter folder
+            // would never reach the new tracks. Rebuilding costs nothing and keeps
+            // "every track once per cycle" true.
+            const orderPatch = snapshot.mode === 'shuffle' ? buildOrder(tracks.length) : {}
+            emit(
+              Object.assign(
+                {
+                  tracks,
+                  libraryError: payload.error === undefined ? null : payload.error,
+                  loading: false,
+                  index,
+                  playing: stillPlaying,
+                },
+                orderPatch,
+              ),
+            )
           } catch (error) {
-            emit({ tracks: [], libraryError: 'READ_FAILED', loading: false, index: -1, detail: String(error) })
+            emit({ tracks: [], libraryError: 'READ_FAILED', loading: false, index: -1, order: [], orderIndex: -1, detail: String(error) })
           }
           applyToElement()
         },
@@ -319,12 +469,74 @@ window.__ModuleLoader__.load({
           applyToElement()
         },
 
-        /** Advance to the next track, starting playback. */
-        next() {
-          const tracks = snapshot.tracks
-          const index = tracks.length === 0 ? -1 : ((snapshot.index < 0 ? 0 : snapshot.index) + 1) % tracks.length
-          emit({ index, playing: tracks.length > 0 })
+        /**
+         * Advance to the next track, starting playback.
+         *
+         * @param automatic - true when a track ENDED rather than the user pressing
+         *   Next. Only `single` mode treats the two differently.
+         */
+        next(automatic = false) {
+          const index = nextIndexFor(automatic)
+          const playing = snapshot.tracks.length > 0
+          emit(Object.assign({ index, playing }, orderPatchFor(index)))
           applyToElement()
+        },
+
+        /** Go to the previous track. Skips to the start of the library when none. */
+        previous() {
+          const length = snapshot.tracks.length
+          if (length === 0) return
+          const index =
+            snapshot.mode === 'shuffle' && snapshot.order.length === length && snapshot.orderIndex >= 0
+              ? snapshot.order[(snapshot.orderIndex - 1 + length) % length]
+              : (snapshot.index <= 0 ? length : snapshot.index) - 1
+          emit(Object.assign({ index, playing: true }, orderPatchFor(index)))
+          applyToElement()
+        },
+
+        /**
+         * Select a specific track by index, starting playback.
+         *
+         * The shuffle cursor follows, so a manual pick does not leave "next"
+         * pointing at a stale position.
+         *
+         * @param index - an index into the current library.
+         */
+        playTrack(index) {
+          const length = snapshot.tracks.length
+          if (index < 0 || index >= length) return
+          emit(Object.assign({ index, playing: true }, orderPatchFor(index)))
+          applyToElement()
+        },
+
+        /**
+         * Switch playback mode.
+         *
+         * Entering `shuffle` builds a fresh order (with the current track first, so
+         * the song playing is not interrupted); leaving it drops the order, since a
+         * permutation is only meaningful to the mode that walks it.
+         *
+         * @param mode - one of {@link PLAY_MODES}; anything else is ignored.
+         */
+        setMode(mode) {
+          if (!PLAY_MODES.includes(mode) || mode === snapshot.mode) return
+          const patch = { mode }
+          if (mode === 'shuffle') {
+            Object.assign(patch, buildOrder(snapshot.tracks.length))
+          } else {
+            // A stale order must not survive into a mode that will not read it, and
+            // must certainly not be reused if shuffle is re-entered after the folder
+            // changed.
+            Object.assign(patch, { order: [], orderIndex: -1 })
+          }
+          emit(patch)
+          applyToElement()
+        },
+
+        /** Cycle to the next mode, as the card's mode button does. */
+        cycleMode() {
+          const at = PLAY_MODES.indexOf(snapshot.mode)
+          this.setMode(PLAY_MODES[(at + 1) % PLAY_MODES.length])
         },
 
         /**
@@ -391,6 +603,31 @@ window.__ModuleLoader__.load({
       return track === undefined ? t('empty') : t('now', { name: track.name })
     }
 
+    /**
+     * The short glyph and full label for one playback mode.
+     *
+     * A glyph on the button and the mode's name in its `title`/`aria-label`: the card
+     * has no room for words, and a mode control the user cannot read is worse than
+     * none. Text is routed through the translator like everything else.
+     *
+     * @param mode - one of {@link PLAY_MODES}.
+     * @param t - translator.
+     * @returns `{ glyph, label, hint }` for that mode.
+     */
+    function modeFace(mode, t) {
+      // Keyed by mode rather than by a generic name, because the whole point of the
+      // control is telling the user WHICH mode is active at a glance.
+      const keys = { sequence: 'modeSequence', shuffle: 'modeShuffle', single: 'modeSingle' }
+      const glyphKeys = { sequence: 'modeSequenceGlyph', shuffle: 'modeShuffleGlyph', single: 'modeSingleGlyph' }
+      const key = keys[mode] ?? 'modeSequence'
+      const glyphKey = glyphKeys[mode] ?? 'modeSequenceGlyph'
+      return {
+        glyph: t(glyphKey),
+        label: t(key),
+        hint: t('modeHint', { mode: t(key) }),
+      }
+    }
+
     /** `{ font: inherit, … }` button styling shared by both surfaces. */
     const buttonStyle = {
       font: 'inherit',
@@ -421,6 +658,7 @@ window.__ModuleLoader__.load({
     function Transport(props) {
       const { state, store, t, compact } = props
       const hasTrack = state.tracks.length > 0 && state.enabled
+      const face = modeFace(state.mode, t)
       return React.createElement(
         React.Fragment,
         null,
@@ -443,10 +681,31 @@ window.__ModuleLoader__.load({
             disabled: !hasTrack || state.tracks.length < 2,
             title: t('next'),
             'aria-label': t('next'),
-            onClick: () => store.next(),
+            // An explicit press, which `single` mode treats differently from a track
+            // simply ending: the mode asks for a repeat, but the user asked to move on.
+            onClick: () => store.next(false),
             style: buttonStyleFor(!hasTrack || state.tracks.length < 2),
           },
           t('next'),
+        ),
+        React.createElement(
+          'button',
+          {
+            type: 'button',
+            // Always enabled, even with no track: the mode is a preference, and a
+            // control that greys out with nothing playing reads as broken.
+            title: face.hint,
+            'aria-label': t('modeLabel') + ': ' + face.label,
+            // `onMode` lets the settings row persist the choice while the overlay,
+            // which has no settings scope, just cycles in memory. One component, two
+            // write paths — the alternative would be two mode controls that could
+            // disagree.
+            onClick: () => (props.onMode === undefined ? store.cycleMode() : props.onMode()),
+            // The glyph is the live indicator of which mode is active, so it is
+            // wide enough for the longest of the three labels.
+            style: Object.assign({}, buttonStyleFor(false), { minWidth: '52px' }),
+          },
+          face.glyph,
         ),
         compact
           ? null
@@ -510,7 +769,10 @@ window.__ModuleLoader__.load({
       // continue with no UI on screen at all.
       React.useEffect(() => {
         store.adoptSettings(stored)
-      }, [store, folder, stored.enabled, stored.volume])
+        // `stored.mode` is a dependency like the others: without it a mode written
+        // by this row would not be adopted back, and the store would keep whichever
+        // mode it had while the document said otherwise.
+      }, [store, folder, stored.enabled, stored.volume, stored.mode])
 
       // The input is a draft until committed: typing a path one character at a
       // time must not write the document on every keystroke.
@@ -690,7 +952,18 @@ window.__ModuleLoader__.load({
             t('browse'),
           ),
 
-          React.createElement(Transport, { state, store, t }),
+          React.createElement(Transport, {
+            state,
+            store,
+            t,
+            // Persist the mode: this surface has the settings scope, the overlay does
+            // not. Cycling here writes the same field the card reads, so the choice
+            // survives a reload.
+            onMode: () => {
+              const at = PLAY_MODES.indexOf(state.mode)
+              write('mode', PLAY_MODES[(at + 1) % PLAY_MODES.length])
+            },
+          }),
 
           React.createElement(
             'input',
@@ -1079,7 +1352,9 @@ window.__ModuleLoader__.load({
           // replay a deleted track or skip a live one.
           onEnded: () => {
             void store.reload()
-            store.next()
+            // `true`: the track ENDED rather than the user pressing Next. This is
+            // what makes `single` mode repeat instead of advancing.
+            store.next(true)
           },
           onError: () => store.set({ playing: false }),
         }),

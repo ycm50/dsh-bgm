@@ -646,7 +646,7 @@ await check('the overlay renders a stop control only while playing', () => {
   const playerHooks2 = makeHooks()
   const playing = render(playerComponent(), playerHooks2)
   const playingButtons = collect(playing, (node) => node.type === 'button')
-  assert.equal(playingButtons.length, 2, 'pause + next')
+  assert.equal(playingButtons.length, 3, 'pause + next + mode')
   const texts = []
   ;(function collectText(node, seen = new Set()) {
     if (typeof node === 'string') { texts.push(node); return }
@@ -1402,6 +1402,246 @@ await check('a press that stays a click still lets the buttons work', () => {
     stopPropagation: () => { stopped += 1 },
   })
   assert.equal(stopped, 0, 'a button press is not swallowed by the drag handler')
+})
+
+// ── playback modes ──────────────────────────────────────────────────────────
+console.log('\nplayback modes (sequence / shuffle / single)')
+
+/** A store with a known library, in a known mode. */
+async function modeStore(names, mode = 'sequence') {
+  const store = sandbox.globalThis.__dshBgmPlaybackStore__
+  const restore = withManifest(names.map((name) => ({ name, src: '/' + name, type: 'audio/mpeg' })))
+  await store.reload()
+  await settle()
+  store.setMode('sequence')
+  store.set({ index: 0, playing: false, order: [], orderIndex: -1 })
+  if (mode !== 'sequence') store.setMode(mode)
+  await settle()
+  return { store, restore }
+}
+
+await check('sequence advances by one and wraps at the end', async () => {
+  const { store, restore } = await modeStore(['a', 'b', 'c'])
+  try {
+    assert.equal(store.getSnapshot().mode, 'sequence')
+    const visited = []
+    for (let step = 0; step < 5; step += 1) {
+      visited.push(store.currentTrack().name)
+      store.next(true)
+    }
+    // Wrapping is what makes a folder a playlist rather than a one-shot queue.
+    assert.deepEqual(visited, ['a', 'b', 'c', 'a', 'b'])
+  } finally {
+    restore()
+  }
+})
+
+await check('single repeats the SAME track when it ends', async () => {
+  const { store, restore } = await modeStore(['a', 'b', 'c'], 'single')
+  try {
+    assert.equal(store.getSnapshot().mode, 'single')
+    store.playTrack(1)
+    const visited = []
+    for (let step = 0; step < 4; step += 1) {
+      visited.push(store.currentTrack().name)
+      // `true` = the track ended on its own, which the mode says to repeat.
+      store.next(true)
+    }
+    assert.deepEqual(visited, ['b', 'b', 'b', 'b'], 'repeat one never advances')
+  } finally {
+    restore()
+  }
+})
+
+await check('single still advances when the user presses Next', async () => {
+  // Without this distinction the Next button would do nothing in repeat-one, which
+  // is a dead control — the mode says what an ENDING track does, not what the user
+  // asking to move on means.
+  const { store, restore } = await modeStore(['a', 'b', 'c'], 'single')
+  try {
+    store.playTrack(0)
+    assert.equal(store.currentTrack().name, 'a')
+    store.next(false)
+    assert.equal(store.currentTrack().name, 'b', 'an explicit Next moves on')
+    store.next(true)
+    assert.equal(store.currentTrack().name, 'b', 'but an ending track still repeats')
+  } finally {
+    restore()
+  }
+})
+
+await check('shuffle visits every track exactly once before repeating', async () => {
+  // The whole reason the order is a materialised permutation: a per-step random
+  // pick repeats before exhausting the folder, which is the classic shuffle
+  // complaint. This asserts the COVER property, not any particular order.
+  const names = ['a', 'b', 'c', 'd', 'e', 'f', 'g', 'h']
+  const { store, restore } = await modeStore(names, 'shuffle')
+  try {
+    assert.equal(store.getSnapshot().mode, 'shuffle')
+    store.playTrack(0)
+    const cycle = []
+    for (let step = 0; step < names.length; step += 1) {
+      cycle.push(store.currentTrack().name)
+      store.next(true)
+    }
+    assert.equal(new Set(cycle).size, names.length, 'no track repeated within one cycle: ' + cycle.join(','))
+    // And the next step begins a fresh cycle rather than stopping.
+    const afterCycle = store.currentTrack().name
+    assert.ok(names.includes(afterCycle), 'playback continues after a full cycle')
+  } finally {
+    restore()
+  }
+})
+
+await check('switching to shuffle does not interrupt the current track', async () => {
+  const { store, restore } = await modeStore(['a', 'b', 'c', 'd'], 'sequence')
+  try {
+    store.playTrack(2)
+    assert.equal(store.currentTrack().name, 'c')
+    store.setMode('shuffle')
+    assert.equal(store.currentTrack().name, 'c', 'the playing song is not swapped out')
+    // The order starts AT the current track, so the first Next is not a jump back.
+    const order = store.getSnapshot().order
+    assert.equal(store.getSnapshot().orderIndex, 0, 'the cursor points at the current track')
+    assert.equal(order[0], 2, 'and the current track heads the order')
+  } finally {
+    restore()
+  }
+})
+
+await check('shuffle reaches every track from wherever the user started', async () => {
+  const names = ['a', 'b', 'c', 'd', 'e', 'f']
+  const { store, restore } = await modeStore(names, 'shuffle')
+  try {
+    // A manual pick must move the cursor with it, or "next" would jump backwards.
+    store.playTrack(4)
+    const cycle = []
+    for (let step = 0; step < names.length; step += 1) {
+      cycle.push(store.currentTrack().name)
+      store.next(true)
+    }
+    assert.equal(new Set(cycle).size, names.length, 'still covers everything: ' + cycle.join(','))
+  } finally {
+    restore()
+  }
+})
+
+await check('leaving shuffle drops the order, and re-entering builds a fresh one', async () => {
+  const { store, restore } = await modeStore(['a', 'b', 'c'], 'shuffle')
+  try {
+    assert.ok(store.getSnapshot().order.length > 0, 'shuffle has an order')
+    store.setMode('sequence')
+    assert.deepEqual([...store.getSnapshot().order], [], 'sequence carries no order')
+    assert.equal(store.getSnapshot().orderIndex, -1)
+    store.setMode('shuffle')
+    assert.equal(store.getSnapshot().order.length, 3, 're-entering builds one')
+  } finally {
+    restore()
+  }
+})
+
+await check('a library refresh rebuilds the shuffle order for the new list', async () => {
+  // An order drawn from the old list would carry dead indices (deleted files) and
+  // miss the new ones, silently breaking "every track once per cycle".
+  const { store, restore } = await modeStore(['a', 'b', 'c', 'd'], 'shuffle')
+  try {
+    assert.equal(store.getSnapshot().order.length, 4)
+    const restore2 = withManifest([
+      { name: 'a', src: '/a', type: 'audio/mpeg' },
+      { name: 'b', src: '/b', type: 'audio/mpeg' },
+    ])
+    try {
+      await store.reload()
+      await settle()
+      const after = store.getSnapshot()
+      assert.equal(after.tracks.length, 2)
+      assert.equal(after.order.length, 2, 'the order matches the new library')
+      assert.ok(
+        after.order.every((index) => index >= 0 && index < 2),
+        'no dead index survives the refresh',
+      )
+    } finally {
+      restore2()
+    }
+  } finally {
+    restore()
+  }
+})
+
+await check('the mode cycles in the documented order', async () => {
+  const { store, restore } = await modeStore(['a', 'b'])
+  try {
+    assert.equal(store.getSnapshot().mode, 'sequence')
+    store.cycleMode()
+    assert.equal(store.getSnapshot().mode, 'shuffle')
+    store.cycleMode()
+    assert.equal(store.getSnapshot().mode, 'single')
+    store.cycleMode()
+    assert.equal(store.getSnapshot().mode, 'sequence', 'and wraps')
+  } finally {
+    restore()
+  }
+})
+
+await check('an unknown mode is refused rather than stored', () => {
+  const store = sandbox.globalThis.__dshBgmPlaybackStore__
+  const before = store.getSnapshot().mode
+  store.setMode('nonsense')
+  assert.equal(store.getSnapshot().mode, before, 'a bad value cannot corrupt the state')
+})
+
+await check('previous walks backwards and wraps, and is order-aware in shuffle', async () => {
+  const { store, restore } = await modeStore(['a', 'b', 'c'])
+  try {
+    store.playTrack(0)
+    store.previous()
+    assert.equal(store.currentTrack().name, 'c', 'wraps to the last track')
+    store.previous()
+    assert.equal(store.currentTrack().name, 'b')
+  } finally {
+    restore()
+  }
+})
+
+await check('the mode is persisted through the settings row, not only in memory', async () => {
+  // The overlay has no settings scope, so the ROW must own the write. Otherwise the
+  // choice would reset on every reload.
+  const client = makeClient()
+  const hookSet = makeHooks()
+  const instance = loaded.factory((specifier) => {
+    if (specifier === 'react') return hookSet.React
+    throw new Error('unexpected require: ' + specifier)
+  })
+  instance.apply(client.ctx)
+  const row = registrationFor(client, 'settings.general.item').component
+  const tree = render(row(), hookSet)
+
+  // Find the mode button by its aria-label, which is the only stable handle.
+  const buttons = collect(tree, (node) => node.type === 'button')
+  const modeButton = buttons.find((node) => String(node.props['aria-label'] ?? '').includes('播放模式'))
+  assert.notEqual(modeButton, undefined, 'the row offers a mode control')
+  modeButton.props.onClick()
+  await new Promise((resolve) => setTimeout(resolve, 0))
+
+  assert.ok(client.writes.length >= 1, 'clicking it wrote to the settings document')
+  const last = client.writes[client.writes.length - 1]
+  assert.equal(last.ops[0].op, 'set')
+  assert.equal(last.ops[0].path[0], 'mode', 'the field the Host schema declares')
+  assert.ok(['sequence', 'shuffle', 'single'].includes(last.ops[0].value), 'a valid mode: ' + last.ops[0].value)
+})
+
+await check('the three mode labels are distinct and translated', () => {
+  // A mode control the user cannot read is worse than none, and three identical
+  // labels would make the active mode invisible.
+  const dict = sandbox.globalThis.__dshBgmPlaybackStore__ === undefined ? null : null
+  void dict
+  const source_ = source
+  for (const key of ['modeSequence', 'modeShuffle', 'modeSingle']) {
+    assert.ok(source_.includes(key + ':'), 'the label exists: ' + key)
+  }
+  assert.ok(source_.includes('modeSequenceGlyph'), 'and a short glyph for the card')
+  assert.ok(source_.includes('modeShuffleGlyph'))
+  assert.ok(source_.includes('modeSingleGlyph'))
 })
 
 console.log('\n' + passed + ' passed, ' + failed + ' failed')

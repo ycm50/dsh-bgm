@@ -10,7 +10,7 @@
  * Run: node _smoke/logic-smoke.mjs
  */
 
-import { mkdtemp, rm, writeFile } from 'node:fs/promises'
+import { mkdtemp, rm, writeFile, readFile } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import { join, sep } from 'node:path'
 import { Readable, Writable } from 'node:stream'
@@ -623,7 +623,7 @@ await checkAsync('the plugin declares the schema, name and inject contract', asy
   const refs = projected.refs ?? {}
   const root = refs[String(projected.uid)] ?? projected
   const properties = root.dict ?? root.properties ?? {}
-  const fields = ['folder', 'enabled', 'volume']
+  const fields = ['folder', 'enabled', 'volume', 'mode']
   for (const field of fields) {
     const node = properties[field]
     const resolved = typeof node === 'number' ? refs[String(node)] : node
@@ -631,6 +631,51 @@ await checkAsync('the plugin declares the schema, name and inject contract', asy
     assert.equal(resolved.meta?.volatile, true, field + ' must be volatile')
   }
 })
+
+await checkAsync('the schema accepts every shape the loader hands it', async () => {
+  // Cordis validates the raw profile row BEFORE calling `apply`, so a schema that
+  // refuses an empty row takes the whole plugin down — and since the row is part of
+  // startup composition, it can take the app's boot with it. The `mode` union is the
+  // riskiest field here, which is why it is exercised in every form.
+  const module = await import('../index.js')
+  for (const [label, input] of [
+    ['empty object', {}],
+    ['null', null],
+    ['undefined', undefined],
+    ['all defaults', { folder: '', enabled: true, volume: 0.5, mode: 'sequence' }],
+    ['a real row', { folder: 'A:\\Music', enabled: true, volume: 0.5, mode: 'shuffle' }],
+    ['mode single', { mode: 'single' }],
+  ]) {
+    assert.doesNotThrow(() => module.Config(input), 'must accept ' + label)
+  }
+})
+
+await checkAsync('the schema refuses values the card must never write', async () => {
+  const module = await import('../index.js')
+  assert.throws(() => module.Config({ mode: 'bogus' }), /sequence|shuffle|single/i, 'an unknown mode is refused')
+  assert.throws(() => module.Config({ volume: 5 }), /volume|1/i, 'an out-of-range volume is refused')
+})
+
+await checkAsync('the Host and the card agree on the accepted modes', async () => {
+  // The two halves are separate bundles and cannot import each other, so the mode
+  // list is duplicated by necessity. A drift would surface at runtime as a refused
+  // write, which the row reports — but it is a one-line check here instead.
+  const module = await import('../index.js')
+  const hostModes = module.internals.PLAY_MODES
+  assert.deepEqual([...hostModes], ['sequence', 'shuffle', 'single'])
+  const clientSource = await readFile(
+    new URL('../client.js', import.meta.url),
+    'utf8',
+  )
+  const declared = /const PLAY_MODES = \[([^\]]+)\]/.exec(clientSource)
+  assert.notEqual(declared, null, 'the card declares its own mode list')
+  const clientModes = declared[1]
+    .split(',')
+    .map((entry) => entry.trim().replace(/^['"]|['"]$/g, ''))
+    .filter((entry) => entry !== '')
+  assert.deepEqual(clientModes, [...hostModes], 'both halves list the same modes, in the same order')
+})
+
 // ── cleanup ──────────────────────────────────────────────────────────────────
 await rm(library, { recursive: true, force: true })
 
